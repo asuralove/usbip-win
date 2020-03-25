@@ -19,6 +19,8 @@ typedef struct _devbuf {
 	BOOL	invalid;
 	/* asynchronous read is in progress */
 	BOOL	in_reading;
+	/* asynchronous write is in progress */
+	BOOL	in_writing;
 	/* step 1: reading header, 2: reading data */
 	int	step_reading;
 	HANDLE	hdev;
@@ -351,6 +353,7 @@ init_devbuf(devbuf_t *buff, const char *desc, BOOL is_req, BOOL swap_req, HANDLE
 	buff->is_req = is_req;
 	buff->swap_req = swap_req;
 	buff->in_reading = FALSE;
+	buff->in_writing = FALSE;
 	buff->invalid = FALSE;
 	buff->step_reading = 0;
 	buff->offhdr = 0;
@@ -403,8 +406,6 @@ read_devbuf(devbuf_t *rbuff, DWORD nreq)
 				err("%s: failed to reallocate buffer: %s", __FUNCTION__, rbuff->desc);
 				return FALSE;
 			}
-			if (rbuff->bufp == rbuff->bufc)
-				rbuff->bufc = bufnew;
 			rbuff->bufp = bufnew;
 			rbuff->bufmaxp += nmore;
 		}
@@ -427,15 +428,17 @@ read_devbuf(devbuf_t *rbuff, DWORD nreq)
 		}
 	}
 
-	if (!ReadFileEx(rbuff->hdev, BUFCUR_P(rbuff), nreq, &rbuff->ovs[0], read_completion)) {
-		DWORD error = GetLastError();
-		err("%s: failed to read: err: 0x%lx", __FUNCTION__, error);
-		if (error == ERROR_NETNAME_DELETED) {
-			err("%s: could the client have dropped the connection?", __FUNCTION__);
+	if (!rbuff->in_reading) {
+		if (!ReadFileEx(rbuff->hdev, BUFCUR_P(rbuff), nreq, &rbuff->ovs[0], read_completion)) {
+			DWORD error = GetLastError();
+			err("%s: failed to read: err: 0x%lx", __FUNCTION__, error);
+			if (error == ERROR_NETNAME_DELETED) {
+				err("%s: could the client have dropped the connection?", __FUNCTION__);
+			}
+			return FALSE;
 		}
-		return FALSE;
+		rbuff->in_reading = TRUE;
 	}
-	rbuff->in_reading = TRUE;
 	return TRUE;
 }
 
@@ -444,9 +447,10 @@ write_completion(DWORD errcode, DWORD nwrite, LPOVERLAPPED lpOverlapped)
 {
 	devbuf_t	*wbuff, *rbuff;
 
+	wbuff = (devbuf_t*)lpOverlapped->hEvent;
+	wbuff->in_writing = FALSE;
 	if (errcode != 0)
 		return;
-	wbuff = (devbuf_t *)lpOverlapped->hEvent;
 
 	if (nwrite == 0) {
 		wbuff->invalid = TRUE;
@@ -465,9 +469,12 @@ write_devbuf(devbuf_t *wbuff, devbuf_t *rbuff)
 		rbuff->offc = 0;
 		rbuff->bufmaxc = rbuff->offhdr;
 	}
-	if (!WriteFileEx(wbuff->hdev, BUFCUR_C(rbuff), BUFREMAIN_C(rbuff), &wbuff->ovs[1], write_completion)) {
-		err("%s: failed to write sock: err: 0x%lx", __FUNCTION__, GetLastError());
-		return FALSE;
+	if (!wbuff->in_writing) {
+		if (!WriteFileEx(wbuff->hdev, BUFCUR_C(rbuff), BUFREMAIN_C(rbuff), &wbuff->ovs[1], write_completion)) {
+			err("%s: failed to write sock: err: 0x%lx", __FUNCTION__, GetLastError());
+			return FALSE;
+		}
+		wbuff->in_writing = TRUE;
 	}
 
 	return TRUE;
